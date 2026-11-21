@@ -246,10 +246,12 @@ async def set_live_status(interaction: discord.Interaction, day: app_commands.Ch
 
 
 @bot.tree.command(name="arsay", description="Send a message and/or attachment as the bot")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(
     text="The message content to send",
     attachment="An optional file or image to send (max 128 MB)",
-    message_id="Optional message ID in this channel to reply to",
+    message_id="Optional message ID in this channel to reply to (requires bot in server)",
 )
 async def arsay_command(
     interaction: discord.Interaction,
@@ -271,14 +273,6 @@ async def arsay_command(
         )
         return
 
-    target_channel = interaction.channel
-    if not target_channel:
-        await interaction.response.send_message(
-            "❌ Could not access this channel.",
-            ephemeral=True,
-        )
-        return
-
     if not text and attachment is None:
         await interaction.response.send_message(
             "❌ Provide at least some text or an attachment to send.",
@@ -289,6 +283,38 @@ async def arsay_command(
     if attachment is not None and attachment.size > MAX_ATTACHMENT_BYTES:
         await interaction.response.send_message(
             "❌ Attachment exceeds the 128 MB limit.",
+            ephemeral=True,
+        )
+        return
+
+    bot_in_guild = (
+        interaction.guild is not None
+        and interaction.guild.get_member(bot.user.id) is not None
+    )
+
+    if not bot_in_guild:
+        if message_id is not None:
+            await interaction.response.send_message(
+                "❌ Replying to a message ID requires the bot to be invited to this server.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=False)
+        try:
+            discord_file = await attachment.to_file() if attachment is not None else None
+            if discord_file is not None:
+                await interaction.followup.send(content=text, file=discord_file)
+            else:
+                await interaction.followup.send(content=text)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Failed to send: {e}")
+        return
+
+    target_channel = interaction.channel
+    if not target_channel:
+        await interaction.response.send_message(
+            "❌ Could not access this channel.",
             ephemeral=True,
         )
         return
@@ -319,13 +345,10 @@ async def arsay_command(
         )
         await interaction.followup.send("✅ Sent.", ephemeral=True)
     except discord.NotFound:
+        await interaction.followup.send("message deleted", ephemeral=True)
+    except discord.Forbidden as e:
         await interaction.followup.send(
-            "message deleted",
-            ephemeral=True,
-        )
-    except discord.Forbidden:
-        await interaction.followup.send(
-            "❌ I do not have permission to send messages, attachments, or access that message here.",
+            f"❌ Missing channel permission here (`{e}`).",
             ephemeral=True,
         )
     except discord.HTTPException as e:
@@ -805,6 +828,11 @@ async def scheduled_event_checker():
     today_str = now.strftime("%Y-%m-%d")
 
     target_slot = None
+    if last_posted_slot != slot_identifier:
+            channel = bot.get_channel(CHANNEL_ID)
+            if not isinstance(channel, discord.abc.GuildChannel) or channel.guild.id != GUILD_ID:
+                print(f"[Auto-Post Error] Channel {CHANNEL_ID} not found in Guild {GUILD_ID}.")
+                return
 
     # Saturday checks (weekday == 5)
     if now.weekday() == 5:
