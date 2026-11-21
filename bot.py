@@ -112,7 +112,7 @@ async def auto_configure_defaults():
 
     save_data({
         "Game_Event_Num": game_event_num,
-        "event_data": event_data, 
+        "event_data": event_data,
         "host_event_counts": host_event_counts,
         "last_posted_slot": last_posted_slot
     })
@@ -146,6 +146,12 @@ def is_host_or_admin(interaction: discord.Interaction) -> bool:
     return is_admin or has_host_role
 
 
+def is_command_allowed_in_guild(interaction: discord.Interaction, *, allow_in_other_guilds: bool = False) -> bool:
+    if interaction.guild_id == GUILD_ID:
+        return True
+    return allow_in_other_guilds
+
+
 SLOT_CHOICES = [
     app_commands.Choice(name="Saturday 3:00 PM IST", value="saturday_3pm"),
     app_commands.Choice(name="Saturday 9:00 PM IST", value="saturday_9pm"),
@@ -162,6 +168,7 @@ async def on_ready():
     try:
         guild = discord.Object(id=GUILD_ID)
         bot.tree.copy_global_to(guild=guild)
+        await bot.tree.sync()
         synced = await bot.tree.sync(guild=guild)
         print(f"Successfully synced {len(synced)} command(s) to Guild ID: {GUILD_ID}")
     except Exception as e:
@@ -179,6 +186,10 @@ async def on_ready():
 @app_commands.checks.has_permissions(administrator=True)
 @app_commands.choices(day=SLOT_CHOICES)
 async def set_host(interaction: discord.Interaction, day: app_commands.Choice[str], user: discord.User):
+    if not is_command_allowed_in_guild(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the main server.", ephemeral=True)
+        return
+
     slot_key = day.value
     user_id_str = str(user.id)
 
@@ -189,7 +200,8 @@ async def set_host(interaction: discord.Interaction, day: app_commands.Choice[st
         host_event_counts[user_id_str] = 0
 
     save_data({
-        "event_data": event_data, 
+        "Game_Event_Num": game_event_num,
+        "event_data": event_data,
         "host_event_counts": host_event_counts,
         "last_posted_slot": last_posted_slot
     })
@@ -212,13 +224,18 @@ async def set_host(interaction: discord.Interaction, day: app_commands.Choice[st
     ],
 )
 async def set_live_status(interaction: discord.Interaction, day: app_commands.Choice[str], status: app_commands.Choice[str]):
+    if not is_command_allowed_in_guild(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the main server.", ephemeral=True)
+        return
+
     if not is_host_or_admin(interaction):
         await interaction.response.send_message("❌ You must have the Event Host role or Administrator permissions to use this command.", ephemeral=True)
         return
 
     event_data[day.value]["live_status"] = status.value
     save_data({
-        "event_data": event_data, 
+        "Game_Event_Num": game_event_num,
+        "event_data": event_data,
         "host_event_counts": host_event_counts,
         "last_posted_slot": last_posted_slot
     })
@@ -227,8 +244,6 @@ async def set_live_status(interaction: discord.Interaction, day: app_commands.Ch
         f"✅ Live status for **{day.name}** updated to **{status.value}**.", ephemeral=True
     )
 
-MAX_ATTACHMENT_BYTES = 128 * 1024 * 1024  # 128 MB
-
 
 @bot.tree.command(name="arsay", description="Send a message and/or attachment as the bot")
 @app_commands.describe(
@@ -236,12 +251,19 @@ MAX_ATTACHMENT_BYTES = 128 * 1024 * 1024  # 128 MB
     attachment="An optional file or image to send (max 128 MB)",
     message_id="Optional message ID in this channel to reply to",
 )
-async def tuffsay_command(
+async def arsay_command(
     interaction: discord.Interaction,
     text: str | None = None,
     attachment: discord.Attachment | None = None,
     message_id: str | None = None,
 ):
+    if not is_command_allowed_in_guild(interaction, allow_in_other_guilds=True):
+        await interaction.response.send_message(
+            "❌ This command is not available here.",
+            ephemeral=True,
+        )
+        return
+
     if interaction.user.id != SAY_ALLOWED_USER_ID:
         await interaction.response.send_message(
             "❌ You are not authorized to use this command.",
@@ -298,7 +320,7 @@ async def tuffsay_command(
         await interaction.followup.send("✅ Sent.", ephemeral=True)
     except discord.NotFound:
         await interaction.followup.send(
-            "❌ Could not find a message with that ID in this channel.",
+            "message deleted",
             ephemeral=True,
         )
     except discord.Forbidden:
@@ -314,6 +336,7 @@ async def tuffsay_command(
     except Exception as e:
         await interaction.followup.send(f"❌ Unexpected error: {e}", ephemeral=True)
 
+
 @bot.tree.command(name="arreact", description="Add up to 6 reactions to a message in this channel")
 @app_commands.describe(
     message_id="The message ID in this channel to react with",
@@ -324,7 +347,7 @@ async def tuffsay_command(
     emoji_5="Fifth emoji to react with (optional)",
     emoji_6="Sixth emoji to react with (optional)",
 )
-async def react_command(
+async def arreact_command(
     interaction: discord.Interaction,
     message_id: str,
     emoji_1: str,
@@ -334,6 +357,13 @@ async def react_command(
     emoji_5: str | None = None,
     emoji_6: str | None = None,
 ):
+    if not is_command_allowed_in_guild(interaction, allow_in_other_guilds=True):
+        await interaction.response.send_message(
+            "❌ This command is not available here.",
+            ephemeral=True,
+        )
+        return
+
     if interaction.user.id != SAY_ALLOWED_USER_ID:
         await interaction.response.send_message(
             "❌ You are not authorized to use this command.",
@@ -403,16 +433,22 @@ async def react_command(
     except Exception as e:
         await interaction.followup.send(f"❌ Unexpected error: {e}", ephemeral=True)
 
+
 @bot.tree.command(name="eventlink", description="Set the game link for a specific time slot")
 @app_commands.choices(day=SLOT_CHOICES)
 async def set_event_link(interaction: discord.Interaction, day: app_commands.Choice[str], link_here: str):
+    if not is_command_allowed_in_guild(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the main server.", ephemeral=True)
+        return
+
     if not is_host_or_admin(interaction):
         await interaction.response.send_message("❌ You must have the Event Host role or Administrator permissions to use this command.", ephemeral=True)
         return
 
     event_data[day.value]["link"] = link_here
     save_data({
-        "event_data": event_data, 
+        "Game_Event_Num": game_event_num,
+        "event_data": event_data,
         "host_event_counts": host_event_counts,
         "last_posted_slot": last_posted_slot
     })
@@ -425,6 +461,10 @@ async def set_event_link(interaction: discord.Interaction, day: app_commands.Cho
 @bot.tree.command(name="addlink", description="Allows the current event host to update the game link in the latest event message")
 @app_commands.describe(link_here="The new game link to set")
 async def add_link(interaction: discord.Interaction, link_here: str):
+    if not is_command_allowed_in_guild(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the main server.", ephemeral=True)
+        return
+
     channel = bot.get_channel(CHANNEL_ID)
     if not channel:
         await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
@@ -458,6 +498,10 @@ async def add_link(interaction: discord.Interaction, link_here: str):
 
 @bot.tree.command(name="endevent", description="Replaces the game link in the last event message with 'event over'")
 async def end_event(interaction: discord.Interaction):
+    if not is_command_allowed_in_guild(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the main server.", ephemeral=True)
+        return
+
     channel = bot.get_channel(CHANNEL_ID)
     if not channel:
         await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
@@ -492,6 +536,10 @@ async def end_event(interaction: discord.Interaction):
 @bot.tree.command(name="testevent", description="Preview the exact event message without waiting for schedule")
 @app_commands.choices(day=SLOT_CHOICES)
 async def test_event(interaction: discord.Interaction, day: app_commands.Choice[str]):
+    if not is_command_allowed_in_guild(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the main server.", ephemeral=True)
+        return
+
     preview_message = build_event_message(day.value)
     await interaction.response.send_message(
         f"**[Preview for {day.name}]**\n\n{preview_message}", ephemeral=True
@@ -503,6 +551,10 @@ async def test_event(interaction: discord.Interaction, day: app_commands.Choice[
 @app_commands.choices(day=SLOT_CHOICES)
 async def post_event(interaction: discord.Interaction, day: app_commands.Choice[str]):
     global game_event_num, last_posted_slot
+    if not is_command_allowed_in_guild(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the main server.", ephemeral=True)
+        return
+
     channel = bot.get_channel(CHANNEL_ID)
     if not channel:
         await interaction.response.send_message("❌ Channel not found or invalid CHANNEL_ID.", ephemeral=True)
@@ -524,7 +576,6 @@ async def post_event(interaction: discord.Interaction, day: app_commands.Choice[
 
         ist = zoneinfo.ZoneInfo("Asia/Kolkata")
         today_str = datetime.now(ist).strftime("%Y-%m-%d")
-        global last_posted_slot
         last_posted_slot = f"{today_str}_{slot_key}"
 
         save_data({
@@ -541,6 +592,10 @@ async def post_event(interaction: discord.Interaction, day: app_commands.Choice[
 
 @bot.tree.command(name="tophosts", description="Displays the top 10 event hosts leaderboard")
 async def top_hosts(interaction: discord.Interaction):
+    if not is_command_allowed_in_guild(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the main server.", ephemeral=True)
+        return
+
     if not host_event_counts:
         await interaction.response.send_message("❌ No host data recorded yet.", ephemeral=True)
         return
@@ -570,6 +625,10 @@ async def top_hosts(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(administrator=True)
 @app_commands.choices(day=SLOT_CHOICES)
 async def cancel_event(interaction: discord.Interaction, day: app_commands.Choice[str]):
+    if not is_command_allowed_in_guild(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the main server.", ephemeral=True)
+        return
+
     slot_key = day.value
     event_data[slot_key]["live_status"] = "canceled"
     event_data[slot_key]["link"] = "event canceled"
@@ -586,9 +645,14 @@ async def cancel_event(interaction: discord.Interaction, day: app_commands.Choic
         ephemeral=False
     )
 
+
 @bot.tree.command(name="abandonevent", description="Abandons the current running event and reverts host and event count")
 async def abandon_event(interaction: discord.Interaction):
     global game_event_num, last_posted_slot
+    if not is_command_allowed_in_guild(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the main server.", ephemeral=True)
+        return
+
     channel = bot.get_channel(CHANNEL_ID)
     if not channel:
         await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
@@ -618,7 +682,7 @@ async def abandon_event(interaction: discord.Interaction):
 
         ist = zoneinfo.ZoneInfo("Asia/Kolkata")
         now = datetime.now(ist)
-        
+
         if now.weekday() == 5:
             slot_key = "saturday_3pm" if now.hour < 18 else "saturday_9pm"
         else:
@@ -628,7 +692,6 @@ async def abandon_event(interaction: discord.Interaction):
         if host_id and host_id in host_event_counts and host_event_counts[host_id] > 0:
             host_event_counts[host_id] -= 1
 
-        
         # Decrement global event number back down so the next event reuses it
         if game_event_num > 1:
             game_event_num -= 1
@@ -652,6 +715,10 @@ async def abandon_event(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(administrator=True)
 @app_commands.describe(message_id="The message ID of the event post to clean up")
 async def remove_link_force(interaction: discord.Interaction, message_id: str):
+    if not is_command_allowed_in_guild(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the main server.", ephemeral=True)
+        return
+
     channel = bot.get_channel(CHANNEL_ID)
     if not channel:
         await interaction.response.send_message("❌ Channel not found or invalid CHANNEL_ID.", ephemeral=True)
@@ -686,6 +753,10 @@ async def remove_link_force(interaction: discord.Interaction, message_id: str):
 @bot.tree.command(name="revertcancel", description="Reverts a canceled slot back to non-live")
 @app_commands.choices(day=SLOT_CHOICES)
 async def revert_cancel(interaction: discord.Interaction, day: app_commands.Choice[str]):
+    if not is_command_allowed_in_guild(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the main server.", ephemeral=True)
+        return
+
     if not is_host_or_admin(interaction):
         await interaction.response.send_message("❌ Only assigned event hosts or administrators can use this command.", ephemeral=True)
         return
@@ -799,4 +870,4 @@ async def scheduled_event_checker():
 async def before_checker():
     await bot.wait_until_ready()
 
-bot.run("removed")
+bot.run("YOUR_BOT_TOKEN")
