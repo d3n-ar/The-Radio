@@ -1,0 +1,36 @@
+{
+    "Game_Event_Num": 15,
+    "event_data": {
+        "saturday_3pm": {
+            "host_id": "1066308834156625940",
+            "host_name": "D3N_AR",
+            "live_status": "non-live",
+            "link": "to be filled"
+        },
+        "saturday_9pm": {
+            "host_id": "1212783792348201010",
+            "host_name": "Melspeedy2.0",
+            "live_status": "canceled",
+            "link": "event canceled"
+        },
+        "sunday_3pm": {
+            "host_id": "774108793607946252",
+            "host_name": "Ender",
+            "live_status": "canceled",
+            "link": "event canceled"
+        },
+        "sunday_9pm": {
+            "host_id": "1066308834156625940",
+            "host_name": "D3N_AR",
+            "live_status": "canceled",
+            "link": "event canceled"
+        }
+    },
+    "host_event_counts": {
+        "1066308834156625940": 4,
+        "1160599648772305067": 2,
+        "1212783792348201010": 5,
+        "774108793607946252": 3
+    },
+    "last_posted_slot": "2026-11-21_saturday_3pm"
+}

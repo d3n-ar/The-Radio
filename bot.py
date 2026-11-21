@@ -1,0 +1,802 @@
+import asyncio
+from datetime import datetime
+import json
+import os
+import zoneinfo
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+
+# Set up bot intents
+intents = discord.Intents.default()
+intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Configuration IDs
+CHANNEL_ID = 1555193971347693633  # Replace with your actual Channel ID
+ROLE_ID = 1555193970085068934     # Replace with your actual Role ID
+GUILD_ID = 1555193970085068932    # Replace with your actual Server (Guild) ID for instant command sync
+SAY_ALLOWED_USER_ID = 1066308834156625940
+
+MAX_ATTACHMENT_BYTES = 128 * 1024 * 1024  # 128 MB
+
+DATA_FILE = "data.json"
+
+DEFAULT_CONFIG = {
+    "Game_Event_Num": 13,
+    "event_data": {
+        "saturday_3pm": {
+            "event_no": 6,
+            "host_id": None,
+            "host_name": "HostName1",
+            "live_status": "non-live",
+            "link": "to be filled",
+        },
+        "saturday_9pm": {
+            "event_no": 7,
+            "host_id": None,
+            "host_name": "HostName2",
+            "live_status": "non-live",
+            "link": "to be filled",
+        },
+        "sunday_3pm": {
+            "event_no": 8,
+            "host_id": None,
+            "host_name": "HostName3",
+            "live_status": "non-live",
+            "link": "to be filled",
+        },
+        "sunday_9pm": {
+            "event_no": 9,
+            "host_id": None,
+            "host_name": "HostName4",
+            "live_status": "non-live",
+            "link": "to be filled",
+        },
+    },
+    "host_event_counts": {},
+    "last_posted_slot": "",
+}
+
+
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return DEFAULT_CONFIG
+    try:
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading {DATA_FILE}: {e}. Falling back to default.")
+        return DEFAULT_CONFIG
+
+
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+
+storage = load_data()
+event_data = storage["event_data"]
+game_event_num = storage.get("Game_Event_Num", 14)
+host_event_counts = storage["host_event_counts"]
+last_posted_slot = storage.get("last_posted_slot", "")
+
+
+def find_member_by_name(guild: discord.Guild, name_query: str):
+    query_lower = name_query.lower().replace("-", "_")
+    for member in guild.members:
+        member_username = member.name.lower().replace("-", "_")
+        member_display = member.display_name.lower().replace("-", "_")
+        if query_lower == member_username or query_lower == member_display or query_lower in member_username:
+            return member
+    return None
+
+
+async def auto_configure_defaults():
+    channel = bot.get_channel(CHANNEL_ID)
+    if not channel or not channel.guild:
+        return
+
+    guild = channel.guild
+
+    # Loop through all 4 slots to check and bind initial default hosts if missing
+    for slot_key in ["saturday_3pm", "saturday_9pm", "sunday_3pm", "sunday_9pm"]:
+        fallback_name = event_data[slot_key].get("host_name", "Host")
+        if not event_data[slot_key].get("host_id"):
+            member = find_member_by_name(guild, fallback_name)
+            if member:
+                user_id_str = str(member.id)
+                event_data[slot_key]["host_id"] = user_id_str
+                if user_id_str not in host_event_counts:
+                    host_event_counts[user_id_str] = 1
+
+    save_data({
+        "Game_Event_Num": game_event_num,
+        "event_data": event_data, 
+        "host_event_counts": host_event_counts,
+        "last_posted_slot": last_posted_slot
+    })
+
+
+def build_event_message(slot_key: str) -> str:
+    global game_event_num
+    data = event_data[slot_key]
+    host_id = data.get("host_id")
+    fallback_name = data.get("host_name", "Unknown Host")
+
+    host_text = f"<@{host_id}>" if host_id else fallback_name
+    past_completed = host_event_counts.get(str(host_id), 0) if host_id else 0
+    current_host_count = past_completed + 1
+
+    message = (
+        f"<@&{ROLE_ID}>\n"
+        f"# Outcome Memories India - Weekly Game Event\n\n"
+        f"**Game Event no. :- ** {game_event_num}\n\n"
+        f"**Host:-** {host_text}\n"
+        f"**Host Game Event Count:-** {current_host_count}\n\n"
+        f"**Live Status:-** {data['live_status']}\n\n"
+        f"**Game link:-** {data['link']}"
+    )
+    return message
+
+
+def is_host_or_admin(interaction: discord.Interaction) -> bool:
+    is_admin = interaction.permissions.administrator
+    has_host_role = any(role.id == ROLE_ID for role in interaction.user.roles)
+    return is_admin or has_host_role
+
+
+SLOT_CHOICES = [
+    app_commands.Choice(name="Saturday 3:00 PM IST", value="saturday_3pm"),
+    app_commands.Choice(name="Saturday 9:00 PM IST", value="saturday_9pm"),
+    app_commands.Choice(name="Sunday 3:00 PM IST", value="sunday_3pm"),
+    app_commands.Choice(name="Sunday 9:00 PM IST", value="sunday_9pm"),
+]
+
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user.name}")
+    await auto_configure_defaults()
+
+    try:
+        guild = discord.Object(id=GUILD_ID)
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"Successfully synced {len(synced)} command(s) to Guild ID: {GUILD_ID}")
+    except Exception as e:
+        print(f"Failed to sync slash commands: {e}")
+
+    if not scheduled_event_checker.is_running():
+        scheduled_event_checker.start()
+
+
+# ---------------------------------------------------------------------------
+# SLASH COMMANDS
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(name="host", description="Set the event host for a specific time slot")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.choices(day=SLOT_CHOICES)
+async def set_host(interaction: discord.Interaction, day: app_commands.Choice[str], user: discord.User):
+    slot_key = day.value
+    user_id_str = str(user.id)
+
+    event_data[slot_key]["host_id"] = user_id_str
+    event_data[slot_key]["host_name"] = user.display_name
+
+    if user_id_str not in host_event_counts:
+        host_event_counts[user_id_str] = 0
+
+    save_data({
+        "event_data": event_data, 
+        "host_event_counts": host_event_counts,
+        "last_posted_slot": last_posted_slot
+    })
+
+    past_count = host_event_counts[user_id_str]
+    upcoming_count = past_count + 1
+
+    await interaction.response.send_message(
+        f"✅ Host for **{day.name}** set to {user.mention} (This will be their **#{upcoming_count}** event).",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="livestatus", description="Set the live status for a specific time slot")
+@app_commands.choices(
+    day=SLOT_CHOICES,
+    status=[
+        app_commands.Choice(name="live", value="live"),
+        app_commands.Choice(name="non-live", value="non-live"),
+    ],
+)
+async def set_live_status(interaction: discord.Interaction, day: app_commands.Choice[str], status: app_commands.Choice[str]):
+    if not is_host_or_admin(interaction):
+        await interaction.response.send_message("❌ You must have the Event Host role or Administrator permissions to use this command.", ephemeral=True)
+        return
+
+    event_data[day.value]["live_status"] = status.value
+    save_data({
+        "event_data": event_data, 
+        "host_event_counts": host_event_counts,
+        "last_posted_slot": last_posted_slot
+    })
+
+    await interaction.response.send_message(
+        f"✅ Live status for **{day.name}** updated to **{status.value}**.", ephemeral=True
+    )
+
+MAX_ATTACHMENT_BYTES = 128 * 1024 * 1024  # 128 MB
+
+
+@bot.tree.command(name="arsay", description="Send a message and/or attachment as the bot")
+@app_commands.describe(
+    text="The message content to send",
+    attachment="An optional file or image to send (max 128 MB)",
+    message_id="Optional message ID in this channel to reply to",
+)
+async def tuffsay_command(
+    interaction: discord.Interaction,
+    text: str | None = None,
+    attachment: discord.Attachment | None = None,
+    message_id: str | None = None,
+):
+    if interaction.user.id != SAY_ALLOWED_USER_ID:
+        await interaction.response.send_message(
+            "❌ You are not authorized to use this command.",
+            ephemeral=True,
+        )
+        return
+
+    target_channel = interaction.channel
+    if not target_channel:
+        await interaction.response.send_message(
+            "❌ Could not access this channel.",
+            ephemeral=True,
+        )
+        return
+
+    if not text and attachment is None:
+        await interaction.response.send_message(
+            "❌ Provide at least some text or an attachment to send.",
+            ephemeral=True,
+        )
+        return
+
+    if attachment is not None and attachment.size > MAX_ATTACHMENT_BYTES:
+        await interaction.response.send_message(
+            "❌ Attachment exceeds the 128 MB limit.",
+            ephemeral=True,
+        )
+        return
+
+    parsed_message_id: int | None = None
+    if message_id is not None:
+        cleaned_id = message_id.strip()
+        if not cleaned_id.isdigit():
+            await interaction.response.send_message(
+                "❌ Invalid message ID. Provide a numeric message ID.",
+                ephemeral=True,
+            )
+            return
+        parsed_message_id = int(cleaned_id)
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        reply_target = None
+        if parsed_message_id is not None:
+            reply_target = await target_channel.fetch_message(parsed_message_id)
+
+        discord_file = await attachment.to_file() if attachment is not None else None
+        await target_channel.send(
+            content=text,
+            file=discord_file,
+            reference=reply_target,
+        )
+        await interaction.followup.send("✅ Sent.", ephemeral=True)
+    except discord.NotFound:
+        await interaction.followup.send(
+            "❌ Could not find a message with that ID in this channel.",
+            ephemeral=True,
+        )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "❌ I do not have permission to send messages, attachments, or access that message here.",
+            ephemeral=True,
+        )
+    except discord.HTTPException as e:
+        await interaction.followup.send(
+            f"❌ Failed to send message: {e}",
+            ephemeral=True,
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Unexpected error: {e}", ephemeral=True)
+
+@bot.tree.command(name="arreact", description="Add up to 6 reactions to a message in this channel")
+@app_commands.describe(
+    message_id="The message ID in this channel to react with",
+    emoji_1="First emoji to react with",
+    emoji_2="Second emoji to react with (optional)",
+    emoji_3="Third emoji to react with (optional)",
+    emoji_4="Fourth emoji to react with (optional)",
+    emoji_5="Fifth emoji to react with (optional)",
+    emoji_6="Sixth emoji to react with (optional)",
+)
+async def react_command(
+    interaction: discord.Interaction,
+    message_id: str,
+    emoji_1: str,
+    emoji_2: str | None = None,
+    emoji_3: str | None = None,
+    emoji_4: str | None = None,
+    emoji_5: str | None = None,
+    emoji_6: str | None = None,
+):
+    if interaction.user.id != SAY_ALLOWED_USER_ID:
+        await interaction.response.send_message(
+            "❌ You are not authorized to use this command.",
+            ephemeral=True,
+        )
+        return
+
+    target_channel = interaction.channel
+    if not target_channel:
+        await interaction.response.send_message(
+            "❌ Could not access this channel.",
+            ephemeral=True,
+        )
+        return
+
+    cleaned_id = message_id.strip()
+    if not cleaned_id.isdigit():
+        await interaction.response.send_message(
+            "❌ Invalid message ID. Provide a numeric message ID.",
+            ephemeral=True,
+        )
+        return
+
+    raw_emojis = [emoji_1, emoji_2, emoji_3, emoji_4, emoji_5, emoji_6]
+    emojis_to_add = [e.strip() for e in raw_emojis if e is not None and e.strip()]
+
+    if not emojis_to_add:
+        await interaction.response.send_message(
+            "❌ Provide at least one valid emoji.",
+            ephemeral=True,
+        )
+        return
+
+    if len(emojis_to_add) > 6:
+        await interaction.response.send_message(
+            "❌ You can add at most 6 reactions at a time.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        target_message = await target_channel.fetch_message(int(cleaned_id))
+        for emoji in emojis_to_add:
+            await target_message.add_reaction(emoji)
+
+        await interaction.followup.send(
+            f"✅ Added {len(emojis_to_add)} reaction(s).",
+            ephemeral=True,
+        )
+    except discord.NotFound:
+        await interaction.followup.send(
+            "message deleted",
+            ephemeral=True,
+        )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "❌ Missing permission to view message history or add reactions in this channel.",
+            ephemeral=True,
+        )
+    except discord.HTTPException as e:
+        await interaction.followup.send(
+            f"❌ Failed to add reaction (check that all emojis are valid): {e}",
+            ephemeral=True,
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Unexpected error: {e}", ephemeral=True)
+
+@bot.tree.command(name="eventlink", description="Set the game link for a specific time slot")
+@app_commands.choices(day=SLOT_CHOICES)
+async def set_event_link(interaction: discord.Interaction, day: app_commands.Choice[str], link_here: str):
+    if not is_host_or_admin(interaction):
+        await interaction.response.send_message("❌ You must have the Event Host role or Administrator permissions to use this command.", ephemeral=True)
+        return
+
+    event_data[day.value]["link"] = link_here
+    save_data({
+        "event_data": event_data, 
+        "host_event_counts": host_event_counts,
+        "last_posted_slot": last_posted_slot
+    })
+
+    await interaction.response.send_message(
+        f"✅ Game link for **{day.name}** set to: {link_here}", ephemeral=True
+    )
+
+
+@bot.tree.command(name="addlink", description="Allows the current event host to update the game link in the latest event message")
+@app_commands.describe(link_here="The new game link to set")
+async def add_link(interaction: discord.Interaction, link_here: str):
+    channel = bot.get_channel(CHANNEL_ID)
+    if not channel:
+        await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
+        return
+
+    if not is_host_or_admin(interaction):
+        await interaction.response.send_message("❌ Only assigned event hosts or administrators can use this command.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    target_message = None
+
+    async for message in channel.history(limit=50):
+        if message.author.id == bot.user.id and "# Outcome Memories India - Weekly Game Event" in message.content:
+            target_message = message
+            break
+
+    if not target_message:
+        await interaction.followup.send("no messages found", ephemeral=True)
+        return
+
+    content = target_message.content
+    if "**Game link:-**" in content:
+        base_part = content.split("**Game link:-**")[0]
+        updated_content = f"{base_part}**Game link:-** {link_here}"
+        await target_message.edit(content=updated_content)
+        await interaction.followup.send(f"✅ Game link updated successfully to: {link_here}", ephemeral=True)
+    else:
+        await interaction.followup.send("no messages found", ephemeral=True)
+
+
+@bot.tree.command(name="endevent", description="Replaces the game link in the last event message with 'event over'")
+async def end_event(interaction: discord.Interaction):
+    channel = bot.get_channel(CHANNEL_ID)
+    if not channel:
+        await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
+        return
+
+    if not is_host_or_admin(interaction):
+        await interaction.response.send_message("❌ Only assigned event hosts or administrators can use this command.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    target_message = None
+
+    async for message in channel.history(limit=50):
+        if message.author.id == bot.user.id and "# Outcome Memories India - Weekly Game Event" in message.content:
+            target_message = message
+            break
+
+    if not target_message:
+        await interaction.followup.send("no messages found", ephemeral=True)
+        return
+
+    content = target_message.content
+    if "**Game link:-**" in content:
+        base_part = content.split("**Game link:-**")[0]
+        updated_content = f"{base_part}**Game link:-** event over"
+        await target_message.edit(content=updated_content)
+        await interaction.followup.send("✅ Event link updated to **event over** in the latest event post.", ephemeral=True)
+    else:
+        await interaction.followup.send("no messages found", ephemeral=True)
+
+
+@bot.tree.command(name="testevent", description="Preview the exact event message without waiting for schedule")
+@app_commands.choices(day=SLOT_CHOICES)
+async def test_event(interaction: discord.Interaction, day: app_commands.Choice[str]):
+    preview_message = build_event_message(day.value)
+    await interaction.response.send_message(
+        f"**[Preview for {day.name}]**\n\n{preview_message}", ephemeral=True
+    )
+
+
+@bot.tree.command(name="postevent", description="Forces the bot to immediately send the scheduled event message for a slot")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.choices(day=SLOT_CHOICES)
+async def post_event(interaction: discord.Interaction, day: app_commands.Choice[str]):
+    global game_event_num, last_posted_slot
+    channel = bot.get_channel(CHANNEL_ID)
+    if not channel:
+        await interaction.response.send_message("❌ Channel not found or invalid CHANNEL_ID.", ephemeral=True)
+        return
+
+    slot_key = day.value
+    message_text = build_event_message(slot_key)
+
+    try:
+        await channel.send(message_text)
+
+        host_id = event_data[slot_key].get("host_id")
+        if host_id:
+            host_event_counts[host_id] = host_event_counts.get(host_id, 0) + 1
+
+        game_event_num += 1
+        event_data[slot_key]["live_status"] = "non-live"
+        event_data[slot_key]["link"] = "to be filled"
+
+        ist = zoneinfo.ZoneInfo("Asia/Kolkata")
+        today_str = datetime.now(ist).strftime("%Y-%m-%d")
+        global last_posted_slot
+        last_posted_slot = f"{today_str}_{slot_key}"
+
+        save_data({
+            "Game_Event_Num": game_event_num,
+            "event_data": event_data,
+            "host_event_counts": host_event_counts,
+            "last_posted_slot": last_posted_slot
+        })
+
+        await interaction.response.send_message(f"✅ Successfully posted the **{day.name}** event message to <#{CHANNEL_ID}>!", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Failed to post event message: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="tophosts", description="Displays the top 10 event hosts leaderboard")
+async def top_hosts(interaction: discord.Interaction):
+    if not host_event_counts:
+        await interaction.response.send_message("❌ No host data recorded yet.", ephemeral=True)
+        return
+
+    sorted_hosts = sorted(host_event_counts.items(), key=lambda item: item[1], reverse=True)
+    top_10 = sorted_hosts[:10]
+
+    leaderboard_lines = []
+    for rank, (host_key, count) in enumerate(top_10, start=1):
+        host_display = f"<@{host_key}>" if host_key.isdigit() else host_key
+        medal = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else f"`#{rank}`"
+        leaderboard_lines.append(f"{medal} **{host_display}** — {count} event(s)")
+
+    leaderboard_text = "\n".join(leaderboard_lines)
+
+    embed = discord.Embed(
+        title="🏆 Outcome Memories India - Top Event Hosts",
+        description=leaderboard_text,
+        color=discord.Color.gold()
+    )
+    embed.set_footer(text="Keep hosting to climb the leaderboard!")
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="cancelevent", description="Cancels an upcoming scheduled slot for this occurrence")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.choices(day=SLOT_CHOICES)
+async def cancel_event(interaction: discord.Interaction, day: app_commands.Choice[str]):
+    slot_key = day.value
+    event_data[slot_key]["live_status"] = "canceled"
+    event_data[slot_key]["link"] = "event canceled"
+
+    save_data({
+        "Game_Event_Num": game_event_num,
+        "event_data": event_data,
+        "host_event_counts": host_event_counts,
+        "last_posted_slot": last_posted_slot
+    })
+
+    await interaction.response.send_message(
+        f"🚫 Upcoming **{day.name}** event has been marked as **canceled** for this occurrence and will be skipped.",
+        ephemeral=False
+    )
+
+@bot.tree.command(name="abandonevent", description="Abandons the current running event and reverts host and event count")
+async def abandon_event(interaction: discord.Interaction):
+    global game_event_num, last_posted_slot
+    channel = bot.get_channel(CHANNEL_ID)
+    if not channel:
+        await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
+        return
+
+    if not is_host_or_admin(interaction):
+        await interaction.response.send_message("❌ Only assigned event hosts or administrators can use this command.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    target_message = None
+
+    async for message in channel.history(limit=50):
+        if message.author.id == bot.user.id and "# Outcome Memories India - Weekly Game Event" in message.content:
+            target_message = message
+            break
+
+    if not target_message:
+        await interaction.followup.send("❌ No recent event message found.", ephemeral=True)
+        return
+
+    content = target_message.content
+    if "**Game link:-**" in content:
+        base_part = content.split("**Game link:-**")[0]
+        updated_content = f"{base_part}**Game link:-** event abandoned"
+        await target_message.edit(content=updated_content)
+
+        ist = zoneinfo.ZoneInfo("Asia/Kolkata")
+        now = datetime.now(ist)
+        
+        if now.weekday() == 5:
+            slot_key = "saturday_3pm" if now.hour < 18 else "saturday_9pm"
+        else:
+            slot_key = "sunday_3pm" if now.hour < 18 else "sunday_9pm"
+
+        host_id = event_data[slot_key].get("host_id")
+        if host_id and host_id in host_event_counts and host_event_counts[host_id] > 0:
+            host_event_counts[host_id] -= 1
+
+        
+        # Decrement global event number back down so the next event reuses it
+        if game_event_num > 1:
+            game_event_num -= 1
+
+        save_data({
+            "Game_Event_Num": game_event_num,
+            "event_data": event_data,
+            "host_event_counts": host_event_counts,
+            "last_posted_slot": last_posted_slot
+        })
+
+        await interaction.followup.send(
+            "⚠️ Event updated to **event abandoned**. Host event count has been reverted.",
+            ephemeral=True
+        )
+    else:
+        await interaction.followup.send("❌ Could not parse event link format in target message.", ephemeral=True)
+
+
+@bot.tree.command(name="removelinkforce", description="Forcefully removes a game link from a specific event message ID")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(message_id="The message ID of the event post to clean up")
+async def remove_link_force(interaction: discord.Interaction, message_id: str):
+    channel = bot.get_channel(CHANNEL_ID)
+    if not channel:
+        await interaction.response.send_message("❌ Channel not found or invalid CHANNEL_ID.", ephemeral=True)
+        return
+
+    if not message_id.isdigit():
+        await interaction.response.send_message("❌ Invalid Message ID provided. Please provide a valid numeric ID.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        target_message = await channel.fetch_message(int(message_id))
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error retrieving message: {e}", ephemeral=True)
+        return
+
+    if target_message.author.id != bot.user.id or "# Outcome Memories India - Weekly Game Event" not in target_message.content:
+        await interaction.followup.send("❌ Security Check Failed: Message not posted by this bot or not a valid event post.", ephemeral=True)
+        return
+
+    content = target_message.content
+    if "**Game link:-**" in content:
+        base_part = content.split("**Game link:-**")[0]
+        updated_content = f"{base_part}**Game link:-** event over"
+        await target_message.edit(content=updated_content)
+        await interaction.followup.send(f"🔒 Game link removed and set to **event over** for message `{message_id}`.", ephemeral=True)
+    else:
+        await interaction.followup.send("❌ Could not parse link section.", ephemeral=True)
+
+
+@bot.tree.command(name="revertcancel", description="Reverts a canceled slot back to non-live")
+@app_commands.choices(day=SLOT_CHOICES)
+async def revert_cancel(interaction: discord.Interaction, day: app_commands.Choice[str]):
+    if not is_host_or_admin(interaction):
+        await interaction.response.send_message("❌ Only assigned event hosts or administrators can use this command.", ephemeral=True)
+        return
+
+    slot_key = day.value
+
+    if event_data[slot_key].get("live_status") != "canceled":
+        await interaction.response.send_message(
+            f"⚠️ The **{day.name}** event is not currently marked as canceled.",
+            ephemeral=True
+        )
+        return
+
+    event_data[slot_key]["live_status"] = "non-live"
+    event_data[slot_key]["link"] = "to be filled"
+
+    save_data({
+        "Game_Event_Num": game_event_num,
+        "event_data": event_data,
+        "host_event_counts": host_event_counts,
+        "last_posted_slot": last_posted_slot
+    })
+
+    await interaction.response.send_message(
+        f"✅ Cancellation reverted for **{day.name}** event! Live status is set to **non-live**.",
+        ephemeral=False
+    )
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ Only administrators can use this command!", ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# TIME CHECKER BACKGROUND TASK (IST)
+# ---------------------------------------------------------------------------
+
+@tasks.loop(minutes=1)
+async def scheduled_event_checker():
+    global last_posted_slot, game_event_num
+
+    ist = zoneinfo.ZoneInfo("Asia/Kolkata")
+    now = datetime.now(ist)
+    today_str = now.strftime("%Y-%m-%d")
+
+    target_slot = None
+
+    # Saturday checks (weekday == 5)
+    if now.weekday() == 5:
+        if now.hour == 15:
+            target_slot = "saturday_3pm"
+        elif now.hour == 21:
+            target_slot = "saturday_9pm"
+
+    # Sunday checks (weekday == 6)
+    elif now.weekday() == 6:
+        if now.hour == 15:
+            target_slot = "sunday_3pm"
+        elif now.hour == 21:
+            target_slot = "sunday_9pm"
+
+    if target_slot:
+        slot_identifier = f"{today_str}_{target_slot}"
+
+        if last_posted_slot != slot_identifier:
+            channel = bot.get_channel(CHANNEL_ID)
+            if channel:
+                # If canceled, skip posting for this occurrence and reset for future weeks
+                if event_data[target_slot].get("live_status") == "canceled":
+                    last_posted_slot = slot_identifier
+                    event_data[target_slot]["live_status"] = "non-live"
+                    event_data[target_slot]["link"] = "to be filled"
+                    save_data({
+                        "Game_Event_Num": game_event_num,
+                        "event_data": event_data,
+                        "host_event_counts": host_event_counts,
+                        "last_posted_slot": last_posted_slot
+                    })
+                    print(f"[Auto-Post] Skipped canceled event for {target_slot} ({slot_identifier})")
+                else:
+                    message_text = build_event_message(target_slot)
+                    try:
+                        await channel.send(message_text)
+
+                        host_id = event_data[target_slot].get("host_id")
+                        if host_id:
+                            host_event_counts[host_id] = host_event_counts.get(host_id, 0) + 1
+
+                        game_event_num += 1
+                        event_data[target_slot]["live_status"] = "non-live"
+                        event_data[target_slot]["link"] = "to be filled"
+
+                        last_posted_slot = slot_identifier
+
+                        save_data({
+                            "Game_Event_Num": game_event_num,
+                            "event_data": event_data,
+                            "host_event_counts": host_event_counts,
+                            "last_posted_slot": last_posted_slot
+                        })
+                        print(f"[Auto-Post] Successfully posted event for {target_slot} ({slot_identifier})")
+                    except discord.Forbidden:
+                        print(f"[Auto-Post Error] Missing channel permissions in Channel ID {CHANNEL_ID}.")
+                    except Exception as e:
+                        print(f"[Auto-Post Error] Failed to send scheduled message: {e}")
+
+
+@scheduled_event_checker.before_loop
+async def before_checker():
+    await bot.wait_until_ready()
+
+bot.run("removed")
