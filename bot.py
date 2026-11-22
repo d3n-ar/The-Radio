@@ -167,10 +167,10 @@ async def on_ready():
 
     try:
         guild = discord.Object(id=GUILD_ID)
-        bot.tree.copy_global_to(guild=guild)
-        await bot.tree.sync()
-        synced = await bot.tree.sync(guild=guild)
-        print(f"Successfully synced {len(synced)} command(s) to Guild ID: {GUILD_ID}")
+        bot.tree.clear_commands(guild=guild)
+        await bot.tree.sync(guild=guild)
+        synced = await bot.tree.sync()
+        print(f"Cleared guild duplicates and synced {len(synced)} global command(s).")
     except Exception as e:
         print(f"Failed to sync slash commands: {e}")
 
@@ -828,11 +828,6 @@ async def scheduled_event_checker():
     today_str = now.strftime("%Y-%m-%d")
 
     target_slot = None
-    if last_posted_slot != slot_identifier:
-            channel = bot.get_channel(CHANNEL_ID)
-            if not isinstance(channel, discord.abc.GuildChannel) or channel.guild.id != GUILD_ID:
-                print(f"[Auto-Post Error] Channel {CHANNEL_ID} not found in Guild {GUILD_ID}.")
-                return
 
     # Saturday checks (weekday == 5)
     if now.weekday() == 5:
