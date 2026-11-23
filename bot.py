@@ -4,6 +4,8 @@ import json
 import os
 import zoneinfo
 import discord
+import time
+import random
 from discord import app_commands
 from discord.ext import commands, tasks
 
@@ -19,6 +21,9 @@ GUILD_ID = 1555193970085068932    # Replace with your actual Server (Guild) ID f
 SAY_ALLOWED_USER_ID = 1066308834156625940
 
 MAX_ATTACHMENT_BYTES = 128 * 1024 * 1024  # 128 MB
+REPORT_CHANNEL_ID = 0
+REPORT_COOLDOWN_SECONDS = 120
+_report_last_used: dict[int, float] = {}
 
 DATA_FILE = "data.json"
 
@@ -56,6 +61,7 @@ DEFAULT_CONFIG = {
     },
     "host_event_counts": {},
     "last_posted_slot": "",
+    "broadcast_channels": {},
 }
 
 
@@ -80,6 +86,7 @@ event_data = storage["event_data"]
 game_event_num = storage.get("Game_Event_Num", 14)
 host_event_counts = storage["host_event_counts"]
 last_posted_slot = storage.get("last_posted_slot", "")
+broadcast_channels: dict[str, int] = dict(storage.get("broadcast_channels", {}))
 
 
 def find_member_by_name(guild: discord.Guild, name_query: str):
@@ -114,7 +121,8 @@ async def auto_configure_defaults():
         "Game_Event_Num": game_event_num,
         "event_data": event_data,
         "host_event_counts": host_event_counts,
-        "last_posted_slot": last_posted_slot
+        "last_posted_slot": last_posted_slot,
+        "broadcast_channels": broadcast_channels
     })
 
 
@@ -150,6 +158,92 @@ def is_command_allowed_in_guild(interaction: discord.Interaction, *, allow_in_ot
     if interaction.guild_id == GUILD_ID:
         return True
     return allow_in_other_guilds
+
+def _is_home_or_dm(interaction: discord.Interaction) -> bool:
+    return interaction.guild_id is None or interaction.guild_id == GUILD_ID
+
+
+def _find_writable_channel(
+    guild: discord.Guild,
+    *,
+    need_attach_files: bool = False,
+) -> discord.TextChannel | None:
+    me = guild.me or guild.get_member(bot.user.id) if bot.user else None
+    if me is None:
+        return None
+
+    for channel in sorted(guild.text_channels, key=lambda c: c.position):
+        perms = channel.permissions_for(me)
+        if perms.view_channel and perms.send_messages:
+            if need_attach_files and not perms.attach_files:
+                continue
+            return channel
+    return None
+
+def _can_send_to_channel(
+    guild: discord.Guild,
+    channel: discord.abc.GuildChannel | None,
+    *,
+    need_attach_files: bool = False,
+) -> bool:
+    if channel is None or getattr(channel, "guild", None) != guild:
+        return False
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        return False
+
+    me = guild.me or (guild.get_member(bot.user.id) if bot.user else None)
+    if me is None:
+        return False
+
+    perms = channel.permissions_for(me)
+    if not perms.view_channel or not perms.send_messages:
+        return False
+    if need_attach_files and not perms.attach_files:
+        return False
+    return True
+
+
+def _pick_random_writable_channel(
+    guild: discord.Guild,
+    *,
+    need_attach_files: bool = False,
+) -> discord.TextChannel | None:
+    writable: list[discord.TextChannel] = [
+        ch
+        for ch in guild.text_channels
+        if _can_send_to_channel(guild, ch, need_attach_files=need_attach_files)
+    ]
+    if not writable:
+        return None
+    return random.choice(writable)
+
+
+def _resolve_broadcast_channel(
+    guild: discord.Guild,
+    explicit_channel_id: int | None = None,
+    *,
+    need_attach_files: bool = False,
+) -> tuple[discord.TextChannel | discord.Thread | None, str | None]:
+    if explicit_channel_id is not None:
+        ch = guild.get_channel(explicit_channel_id)
+        if ch is None:
+            return None, f"❌ Channel `{explicit_channel_id}` was not found in **{guild.name}**."
+        if not isinstance(ch, (discord.TextChannel, discord.Thread)):
+            return None, "❌ Target channel is not a supported text or thread channel."
+        if not _can_send_to_channel(guild, ch, need_attach_files=need_attach_files):
+            return None, f"❌ Missing required permissions in <#{ch.id}> (**{guild.name}**)."
+        return ch, None
+
+    saved_id = broadcast_channels.get(str(guild.id))
+    if saved_id is not None:
+        saved_ch = guild.get_channel(int(saved_id))
+        if _can_send_to_channel(guild, saved_ch, need_attach_files=need_attach_files):
+            return saved_ch, None
+
+    random_ch = _pick_random_writable_channel(guild, need_attach_files=need_attach_files)
+    if random_ch is None:
+        return None, f"❌ No writable channel with required permissions found in **{guild.name}**."
+    return random_ch, None
 
 
 SLOT_CHOICES = [
@@ -808,6 +902,358 @@ async def revert_cancel(interaction: discord.Interaction, day: app_commands.Choi
         ephemeral=False
     )
 
+@bot.tree.command(
+    name="setbroadcastchannel",
+    description="Set the default channel for broadcast messages in this server",
+)
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.describe(channel_id="Channel ID in this server to use for broadcasts")
+async def set_broadcast_channel_command(interaction: discord.Interaction, channel_id: str):
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "❌ This command can only be used inside a server.",
+            ephemeral=True,
+        )
+        return
+
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "❌ Only server administrators can use `/setbroadcastchannel`.",
+            ephemeral=True,
+        )
+        return
+
+    cleaned_id = channel_id.strip()
+    if not cleaned_id.isdigit():
+        await interaction.response.send_message(
+            "❌ Invalid channel ID. Provide a numeric channel ID.",
+            ephemeral=True,
+        )
+        return
+
+    target_id = int(cleaned_id)
+    target_channel = interaction.guild.get_channel(target_id)
+    if target_channel is None:
+        await interaction.response.send_message(
+            f"❌ Channel `{target_id}` was not found in **{interaction.guild.name}**.",
+            ephemeral=True,
+        )
+        return
+
+    if not isinstance(target_channel, (discord.TextChannel, discord.Thread)):
+        await interaction.response.send_message(
+            "❌ Please select a text channel or thread.",
+            ephemeral=True,
+        )
+        return
+
+    broadcast_channels[str(interaction.guild.id)] = target_id
+    save_data({
+        "Game_Event_Num": game_event_num,
+        "event_data": event_data,
+        "host_event_counts": host_event_counts,
+        "last_posted_slot": last_posted_slot,
+        "broadcast_channels": broadcast_channels,
+    })
+
+    await interaction.response.send_message(
+        f"✅ Saved <#{target_channel.id}> as the default broadcast channel for **{interaction.guild.name}**.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="broadcast",
+    description="Send a message and/or attachment to a specific server",
+)
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(
+    guild_id="Target server (guild) ID",
+    channel_id="Optional target channel ID (uses saved default or random writable channel if omitted)",
+    text="Message text to send",
+    attachment="Optional attachment (max 128 MB)",
+)
+async def broadcast_command(
+    interaction: discord.Interaction,
+    guild_id: str,
+    channel_id: str | None = None,
+    text: str | None = None,
+    attachment: discord.Attachment | None = None,
+):
+    if not _is_home_or_dm(interaction):
+        await interaction.response.send_message(
+            "❌ `/broadcast` can only be used from the main server or in DMs.",
+            ephemeral=True,
+        )
+        return
+
+    if interaction.user.id != SAY_ALLOWED_USER_ID:
+        await interaction.response.send_message(
+            "❌ You are not authorized to use this command.",
+            ephemeral=True,
+        )
+        return
+
+    cleaned_guild_id = guild_id.strip()
+    if not cleaned_guild_id.isdigit():
+        await interaction.response.send_message(
+            "❌ Invalid guild ID. Provide a numeric server ID.",
+            ephemeral=True,
+        )
+        return
+
+    parsed_channel_id: int | None = None
+    if channel_id is not None:
+        cleaned_channel_id = channel_id.strip()
+        if not cleaned_channel_id.isdigit():
+            await interaction.response.send_message(
+                "❌ Invalid channel ID. Provide a numeric channel ID.",
+                ephemeral=True,
+            )
+            return
+        parsed_channel_id = int(cleaned_channel_id)
+
+    if not text and attachment is None:
+        await interaction.response.send_message(
+            "❌ Provide at least some text or an attachment to send.",
+            ephemeral=True,
+        )
+        return
+
+    if attachment is not None and attachment.size > MAX_ATTACHMENT_BYTES:
+        await interaction.response.send_message(
+            "❌ Attachment exceeds the 128 MB limit.",
+            ephemeral=True,
+        )
+        return
+
+    target_guild = bot.get_guild(int(cleaned_guild_id))
+    if target_guild is None:
+        await interaction.response.send_message(
+            "❌ Bot is not in a server with that guild ID or the ID is invalid.",
+            ephemeral=True,
+        )
+        return
+
+    target_channel, error_msg = _resolve_broadcast_channel(
+        target_guild,
+        parsed_channel_id,
+        need_attach_files=(attachment is not None),
+    )
+    if target_channel is None:
+        await interaction.response.send_message(
+            error_msg or "❌ Could not resolve a target channel.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        discord_file = await attachment.to_file() if attachment is not None else None
+        if discord_file is not None:
+            await target_channel.send(content=text, file=discord_file)
+        else:
+            await target_channel.send(content=text)
+
+        await interaction.followup.send(
+            f"✅ Broadcast sent to <#{target_channel.id}> in **{target_guild.name}**.",
+            ephemeral=True,
+        )
+    except discord.Forbidden as e:
+        await interaction.followup.send(
+            f"❌ Forbidden when sending to <#{target_channel.id}> in **{target_guild.name}**: `{e}`",
+            ephemeral=True,
+        )
+    except discord.HTTPException as e:
+        await interaction.followup.send(
+            f"❌ Failed to broadcast message: `{e}`",
+            ephemeral=True,
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Unexpected error: {e}", ephemeral=True)
+
+
+@bot.tree.command(
+    name="broadcastall",
+    description="Send a message and/or attachment to all servers the bot is in",
+)
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(
+    text="Message text to send to all servers",
+    attachment="Optional attachment (max 128 MB)",
+)
+async def broadcastall_command(
+    interaction: discord.Interaction,
+    text: str | None = None,
+    attachment: discord.Attachment | None = None,
+):
+    if not _is_home_or_dm(interaction):
+        await interaction.response.send_message(
+            "❌ `/broadcastall` can only be used from the main server or in DMs.",
+            ephemeral=True,
+        )
+        return
+
+    if interaction.user.id != SAY_ALLOWED_USER_ID:
+        await interaction.response.send_message(
+            "❌ You are not authorized to use this command.",
+            ephemeral=True,
+        )
+        return
+
+    if not text and attachment is None:
+        await interaction.response.send_message(
+            "❌ Provide at least some text or an attachment to send.",
+            ephemeral=True,
+        )
+        return
+
+    if attachment is not None and attachment.size > MAX_ATTACHMENT_BYTES:
+        await interaction.response.send_message(
+            "❌ Attachment exceeds the 128 MB limit.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    sent_count = 0
+    skipped_count = 0
+    failed_guilds: list[str] = []
+
+    for guild in bot.guilds:
+        channel, _ = _resolve_broadcast_channel(
+            guild,
+            explicit_channel_id=None,
+            need_attach_files=(attachment is not None),
+        )
+        if channel is None:
+            skipped_count += 1
+            continue
+
+        try:
+            discord_file = await attachment.to_file() if attachment is not None else None
+            if discord_file is not None:
+                await channel.send(content=text, file=discord_file)
+            else:
+                await channel.send(content=text)
+            sent_count += 1
+        except Exception as e:
+            failed_guilds.append(f"{guild.name} (`{guild.id}`): {e}")
+
+    summary = (
+        f"✅ Broadcast complete.\n"
+        f"• Sent: **{sent_count}** server(s)\n"
+        f"• Skipped (no writable channel/perms): **{skipped_count}**"
+    )
+    if failed_guilds:
+        preview_errors = "\n".join(failed_guilds[:5])
+        summary += f"\n• Failed (**{len(failed_guilds)}**):\n{preview_errors}"
+
+    await interaction.followup.send(summary, ephemeral=True)
+
+
+@bot.tree.command(name="report", description="Send a report to the designated report channel")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(
+    text="Details of your report",
+    attachment="Optional screenshot or file (max 128 MB)",
+)
+async def report_command(
+    interaction: discord.Interaction,
+    text: str | None = None,
+    attachment: discord.Attachment | None = None,
+):
+    if not is_command_allowed_in_guild(interaction, allow_in_other_guilds=False) and interaction.guild_id is not None:
+        await interaction.response.send_message(
+            "❌ `/report` is not available in this server.",
+            ephemeral=True,
+        )
+        return
+
+    if not text and attachment is None:
+        await interaction.response.send_message(
+            "❌ Provide report details or an attachment.",
+            ephemeral=True,
+        )
+        return
+
+    if attachment is not None and attachment.size > MAX_ATTACHMENT_BYTES:
+        await interaction.response.send_message(
+            "❌ Attachment exceeds the 128 MB limit.",
+            ephemeral=True,
+        )
+        return
+
+    now = time.monotonic()
+    last_used = _report_last_used.get(interaction.user.id)
+    if last_used is not None:
+        elapsed = now - last_used
+        if elapsed < REPORT_COOLDOWN_SECONDS:
+            remaining = int(REPORT_COOLDOWN_SECONDS - elapsed) + 1
+            await interaction.response.send_message(
+                f"⏳ Please wait **{remaining}s** before sending another report.",
+                ephemeral=True,
+            )
+            return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        report_channel = bot.get_channel(REPORT_CHANNEL_ID)
+        if report_channel is None:
+            report_channel = await bot.fetch_channel(REPORT_CHANNEL_ID)
+
+        if not isinstance(report_channel, (discord.TextChannel, discord.Thread)):
+            await interaction.followup.send(
+                "❌ Configured report channel is not a valid text channel.",
+                ephemeral=True,
+            )
+            return
+
+        source_info = (
+            f"**{interaction.guild.name}** (`{interaction.guild.id}`) / <#{interaction.channel_id}>"
+            if interaction.guild is not None
+            else "Direct Messages"
+        )
+        report_body = (
+            f"📩 **New Report**\n"
+            f"**From:** {interaction.user.mention} (`{interaction.user}` | ID: `{interaction.user.id}`)\n"
+            f"**Source:** {source_info}\n\n"
+            f"**Message:**\n{text if text else '*(No text provided)*'}"
+        )
+
+        discord_file = await attachment.to_file() if attachment is not None else None
+        if discord_file is not None:
+            await report_channel.send(content=report_body, file=discord_file)
+        else:
+            await report_channel.send(content=report_body)
+
+        _report_last_used[interaction.user.id] = time.monotonic()
+        await interaction.followup.send(
+            "✅ Your report has been sent.",
+            ephemeral=True,
+        )
+    except discord.NotFound:
+        await interaction.followup.send(
+            "❌ Report channel could not be found.",
+            ephemeral=True,
+        )
+    except discord.Forbidden as e:
+        await interaction.followup.send(
+            f"❌ Bot does not have permission to post in the report channel (`{e}`).",
+            ephemeral=True,
+        )
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Failed to send report: {e}",
+            ephemeral=True,
+        )
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
