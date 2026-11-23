@@ -1049,7 +1049,7 @@ async def broadcast_command(
         )
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=False)
 
     try:
         discord_file = await attachment.to_file() if attachment is not None else None
@@ -1073,7 +1073,7 @@ async def broadcast_command(
             ephemeral=False,
         )
     except Exception as e:
-        await interaction.followup.send(f"❌ Unexpected error: {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ Unexpected error: {e}", ephemeral=False)
 
 
 @bot.tree.command(
@@ -1119,7 +1119,7 @@ async def broadcastall_command(
         )
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=False)
 
     sent_count = 0
     skipped_count = 0
