@@ -1060,17 +1060,17 @@ async def broadcast_command(
 
         await interaction.followup.send(
             f"✅ Broadcast sent to <#{target_channel.id}> in **{target_guild.name}**.",
-            ephemeral=True,
+            ephemeral=False,
         )
     except discord.Forbidden as e:
         await interaction.followup.send(
             f"❌ Forbidden when sending to <#{target_channel.id}> in **{target_guild.name}**: `{e}`",
-            ephemeral=True,
+            ephemeral=False,
         )
     except discord.HTTPException as e:
         await interaction.followup.send(
             f"❌ Failed to broadcast message: `{e}`",
-            ephemeral=True,
+            ephemeral=False,
         )
     except Exception as e:
         await interaction.followup.send(f"❌ Unexpected error: {e}", ephemeral=True)
@@ -1154,7 +1154,7 @@ async def broadcastall_command(
         preview_errors = "\n".join(failed_guilds[:5])
         summary += f"\n• Failed (**{len(failed_guilds)}**):\n{preview_errors}"
 
-    await interaction.followup.send(summary, ephemeral=True)
+    await interaction.followup.send(summary, ephemeral=False)
 
 
 @bot.tree.command(name="report", description="Send a report to the designated report channel")
@@ -1237,7 +1237,7 @@ async def report_command(
         _report_last_used[interaction.user.id] = time.monotonic()
         await interaction.followup.send(
             "✅ Your report has been sent.",
-            ephemeral=True,
+            ephemeral=False,
         )
     except discord.NotFound:
         await interaction.followup.send(
@@ -1252,7 +1252,7 @@ async def report_command(
     except Exception as e:
         await interaction.followup.send(
             f"❌ Failed to send report: {e}",
-            ephemeral=True,
+            ephemeral=False,
         )
 
 @bot.tree.error
