@@ -21,7 +21,7 @@ GUILD_ID = 1555193970085068932    # Replace with your actual Server (Guild) ID f
 SAY_ALLOWED_USER_ID = 1066308834156625940
 
 MAX_ATTACHMENT_BYTES = 128 * 1024 * 1024  # 128 MB
-REPORT_CHANNEL_ID = 0
+REPORT_CHANNEL_ID = 1574348553558560910
 REPORT_COOLDOWN_SECONDS = 120
 _report_last_used: dict[int, float] = {}
 
@@ -125,6 +125,25 @@ async def auto_configure_defaults():
         "broadcast_channels": broadcast_channels
     })
 
+async def _echo_to_origin_channel(
+    interaction: discord.Interaction,
+    *,
+    text: str | None,
+    attachment: discord.Attachment | None,
+    already_sent_channel_ids: set[int] | None = None,
+) -> tuple[bool, str | None]:
+    origin = interaction.channel
+    if origin is None or not isinstance(origin, (discord.TextChannel, discord.Thread, discord.DMChannel)):
+        return False, "origin channel unavailable or not a guild member"
+
+    if already_sent_channel_ids is not None and origin.id in already_sent_channel_ids:
+        return False, None
+
+    try:
+        await _send_to_channel_or_user(origin, text=text, attachment=attachment)
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 def build_event_message(slot_key: str) -> str:
     global game_event_num
@@ -1058,6 +1077,21 @@ async def broadcast_command(
         else:
             await target_channel.send(content=text)
 
+        origin = interaction.channel
+        if (
+            origin is not None
+            and isinstance(origin, (discord.TextChannel, discord.Thread, discord.DMChannel))
+            and origin.id != target_channel.id
+        ):
+            try:
+                origin_file = await attachment.to_file() if attachment is not None else None
+                if origin_file is not None:
+                    await origin.send(content=text, file=origin_file)
+                else:
+                    await origin.send(content=text)
+            except Exception as echo_err:
+                print(f"[Broadcast Origin Echo Warning] Failed to echo to {origin.id}: {echo_err}")
+
         await interaction.followup.send(
             f"✅ Broadcast sent to <#{target_channel.id}> in **{target_guild.name}**.",
             ephemeral=False,
@@ -1124,6 +1158,7 @@ async def broadcastall_command(
     sent_count = 0
     skipped_count = 0
     failed_guilds: list[str] = []
+    sent_channel_ids: set[int] = set()
 
     for guild in bot.guilds:
         channel, _ = _resolve_broadcast_channel(
@@ -1142,8 +1177,24 @@ async def broadcastall_command(
             else:
                 await channel.send(content=text)
             sent_count += 1
+            sent_channel_ids.add(channel.id)
         except Exception as e:
             failed_guilds.append(f"{guild.name} (`{guild.id}`): {e}")
+
+    origin = interaction.channel
+    if (
+        origin is not None
+        and isinstance(origin, (discord.TextChannel, discord.Thread, discord.DMChannel))
+        and origin.id not in sent_channel_ids
+    ):
+        try:
+            origin_file = await attachment.to_file() if attachment is not None else None
+            if origin_file is not None:
+                await origin.send(content=text, file=origin_file)
+            else:
+                await origin.send(content=text)
+        except Exception as echo_err:
+            print(f"[BroadcastAll Origin Echo Warning] Failed to echo to {origin.id}: {echo_err}")
 
     summary = (
         f"✅ Broadcast complete.\n"
