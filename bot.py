@@ -1169,12 +1169,12 @@ async def report_command(
     text: str | None = None,
     attachment: discord.Attachment | None = None,
 ):
-    if not is_command_allowed_in_guild(interaction, allow_in_other_guilds=False) and interaction.guild_id is not None:
-        await interaction.response.send_message(
-            "❌ `/report` is not available in this server.",
-            ephemeral=True,
-        )
-        return
+    #if not is_command_allowed_in_guild(interaction, allow_in_other_guilds=False) and interaction.guild_id is not None:
+    #    await interaction.response.send_message(
+    #        "❌ `/report` is not available in this server.",
+    #        ephemeral=True,
+    #    )
+    #    return
 
     if not text and attachment is None:
         await interaction.response.send_message(
