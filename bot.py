@@ -982,12 +982,12 @@ async def broadcast_command(
     text: str | None = None,
     attachment: discord.Attachment | None = None,
 ):
-    if not _is_home_or_dm(interaction):
-        await interaction.response.send_message(
-            "❌ `/broadcast` can only be used from the main server or in DMs.",
-            ephemeral=True,
-        )
-        return
+    #if not _is_home_or_dm(interaction):
+    #    await interaction.response.send_message(
+    #        "❌ `/broadcast` can only be used from the main server or in DMs.",
+    #        ephemeral=True,
+    #    )
+    #    return
 
     if interaction.user.id != SAY_ALLOWED_USER_ID:
         await interaction.response.send_message(
